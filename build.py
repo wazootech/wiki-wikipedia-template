@@ -1,6 +1,8 @@
 """Build the wiki with the full Wikipedia-themed layout.
 
 Usage: python build.py [--output-dir _site]
+
+Depends on wazootech-wiki==0.1.16 as a library.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pygments
-from jinja2 import Template
 from pygments.util import ClassNotFound
 
 from wiki.assets import build_asset_manifest
@@ -27,7 +28,9 @@ from wiki.links import is_external_link, resolve_page_route
 from wiki.paths import page_output_path
 from wiki.schemas.metadata import METADATA_VIEWS
 from wiki.schemas.site import VirtualPage, WikiSite
+from wiki.site.backlinks import build_backlinks_html
 from wiki.site.build import build_site, expand_known_curie
+from wiki.site.layout_tokens import substitute
 from wiki.site.markdown import (
     METADATA_HIDDEN_FIELDS,
     _get_page_categories,
@@ -61,103 +64,6 @@ def _build_toc_html(page: VirtualPage, base_url: str, url_style: str) -> str:
 {items}
 </ul>
 </div>"""
-
-
-def _build_sidebar_contents_html(page: VirtualPage, base_url: str, url_style: str) -> str:
-    if not page.outline:
-        return ""
-    items = '<li class="toclevel-0 l2"><a href="#firstHeading">(Top)</a></li>\n'
-    for item in page.outline:
-        title_html = render_outline_title(item.title, base_url, url_style, page.full_slug)
-        items += f'<li class="toclevel-{item.level - 1} l{item.level}"><a href="#{item.slug}">{title_html}</a></li>\n'
-    return f"""<div class="portal portal-contents" role="navigation" id="p-contents" aria-label="Page contents">
-    <h3>Contents</h3>
-    <ul>
-{items}
-    </ul>
-  </div>"""
-
-
-def _build_backlinks_html(page: VirtualPage, site: WikiSite, base_url: str, url_style: str) -> str:
-    if not page.backlink_slugs:
-        return ""
-    items = ""
-    for bl in page.backlink_slugs:
-        target = site.pages_by_route.get(bl)
-        title = target.title if target is not None else bl.replace("-", " ").title()
-        route = target.full_slug if target is not None else bl
-        items += f'<li><a href="{page_href(base_url, route, url_style)}">{html_module.escape(title)}</a></li>\n'
-    return f"""<section class="page-meta">
-<h2>Backlinks</h2>
-<ul class="backlinks-list">
-{items}
-</ul>
-</section>"""
-
-
-def _build_metadata_panel_html(page: VirtualPage, site: WikiSite, selected_view: str) -> str:
-    if not page.frontmatter:
-        return ""
-    page_config = site.config or Config.for_root(Path.cwd(), wiki={"inputs": []})
-    view_group_id = _metadata_view_dom_id(page)
-    radios_and_labels: list[str] = []
-    panels: list[str] = []
-    for view in METADATA_VIEWS:
-        view_id = view.id
-        input_id = f"{view_group_id}-{view_id}"
-        checked = ' checked="checked"' if view_id == selected_view else ""
-        radios_and_labels.append(
-            f'<input class="metadata-format-input" type="radio" name="{view_group_id}" '
-            f'id="{input_id}" value="{view_id}"{checked}>'
-            f'<label class="metadata-format-label" for="{input_id}">{html_module.escape(view.label)}</label>'
-        )
-        highlighted, lexer, raw_text = _metadata_content_for_page(page, page_config, view)
-        panels.append(
-            f'<div class="metadata-format-panel metadata-format-panel-{view_id}">'
-            f'{render_copyable_pre(raw_text, highlighted, pre_class="highlight", code_class=f"language-{html_module.escape(lexer)}")}'
-            f"</div>"
-        )
-    return f"""<section class="page-meta metadata-panel">
-<div class="metadata-format-switch" role="group" aria-label="Metadata RDF format">
-  <div class="metadata-format-toolbar">
-    <span class="metadata-format-heading">Format</span>
-    <div class="metadata-format-options">{''.join(radios_and_labels)}</div>
-  </div>
-  <div class="metadata-format-panels">
-    {''.join(panels)}
-  </div>
-</div>
-</section>"""
-
-
-def _metadata_view_dom_id(page: VirtualPage) -> str:
-    import re
-    safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", page.full_slug or "index").strip("-") or "index"
-    return f"metadata-format-{safe_slug.lower()}"
-
-
-def _metadata_content_for_page(page: VirtualPage, config: Config, view) -> tuple[str, str, str]:
-    rdf = process_rdf_format(
-        page.frontmatter,
-        page.full_slug,
-        config.context,
-        view.format,
-        mode=view.mode,
-    )
-    if view.format == "json-ld":
-        text = json.dumps(rdf, indent=2, default=str)
-    else:
-        text = rdf if isinstance(rdf, str) else str(rdf)
-    return _highlight_metadata(text, view.lexer), view.lexer, text
-
-
-def _highlight_metadata(value: str, lexer_name: str) -> str:
-    try:
-        lexer = pygments.lexers.get_lexer_by_name(resolve_metadata_pygments_lexer(lexer_name))
-    except ClassNotFound:
-        return html_module.escape(value)
-    from pygments.formatters import HtmlFormatter
-    return pygments.highlight(value, lexer, HtmlFormatter(nowrap=True))
 
 
 def _build_infobox_html(page: VirtualPage, site: WikiSite, base_url: str, url_style: str) -> str:
@@ -317,13 +223,115 @@ def _type_label(page: VirtualPage) -> str:
     return ""
 
 
-def _build_index_page_html(
-    site: WikiSite,
-    base_url: str,
-    url_style: str,
-    template: Template,
-    pages_json: str,
-) -> str:
+def _build_metadata_panel_html(page: VirtualPage, site: WikiSite, selected_view: str) -> str:
+    if not page.frontmatter:
+        return ""
+    page_config = site.config or Config.for_root(Path.cwd(), wiki={"inputs": []})
+    view_group_id = _metadata_view_dom_id(page)
+    radios_and_labels: list[str] = []
+    panels: list[str] = []
+    for view in METADATA_VIEWS:
+        view_id = view.id
+        input_id = f"{view_group_id}-{view_id}"
+        checked = ' checked="checked"' if view_id == selected_view else ""
+        radios_and_labels.append(
+            f'<input class="metadata-format-input" type="radio" name="{view_group_id}" '
+            f'id="{input_id}" value="{view_id}"{checked}>'
+            f'<label class="metadata-format-label" for="{input_id}">{html_module.escape(view.label)}</label>'
+        )
+        highlighted, lexer, raw_text = _metadata_content_for_page(page, page_config, view)
+        panels.append(
+            f'<div class="metadata-format-panel metadata-format-panel-{view_id}">'
+            f'{render_copyable_pre(raw_text, highlighted, pre_class="highlight", code_class=f"language-{html_module.escape(lexer)}")}'
+            f"</div>"
+        )
+    return f"""<section class="page-meta metadata-panel">
+<div class="metadata-format-switch" role="group" aria-label="Metadata RDF format">
+  <div class="metadata-format-toolbar">
+    <span class="metadata-format-heading">Format</span>
+    <div class="metadata-format-options">{''.join(radios_and_labels)}</div>
+  </div>
+  <div class="metadata-format-panels">
+    {''.join(panels)}
+  </div>
+</div>
+</section>"""
+
+
+def _metadata_view_dom_id(page: VirtualPage) -> str:
+    import re
+    safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", page.full_slug or "index").strip("-") or "index"
+    return f"metadata-format-{safe_slug.lower()}"
+
+
+def _metadata_content_for_page(page: VirtualPage, config: Config, view) -> tuple[str, str, str]:
+    rdf = process_rdf_format(
+        page.frontmatter,
+        page.full_slug,
+        config.context,
+        view.format,
+        mode=view.mode,
+    )
+    if view.format == "json-ld":
+        text = json.dumps(rdf, indent=2, default=str)
+    else:
+        text = rdf if isinstance(rdf, str) else str(rdf)
+    return _highlight_metadata(text, view.lexer), view.lexer, text
+
+
+def _highlight_metadata(value: str, lexer_name: str) -> str:
+    try:
+        lexer = pygments.lexers.get_lexer_by_name(resolve_metadata_pygments_lexer(lexer_name))
+    except ClassNotFound:
+        return html_module.escape(value)
+    from pygments.formatters import HtmlFormatter
+    return pygments.highlight(value, lexer, HtmlFormatter(nowrap=True))
+
+
+def _build_categories_html(page: VirtualPage, base_url: str) -> str:
+    cats = _get_page_categories(page)
+    if not cats:
+        return ""
+    from urllib.parse import quote
+    cat_items = "".join(
+        f'<li class="catlinks-item"><a href="{base_url}/?category={quote(cat)}">{html_module.escape(cat)}</a></li>'
+        for cat in cats
+    )
+    return f"""<div class="catlinks" id="catlinks">
+<div class="catlinks-label">Categories:</div>
+<ul class="catlinks-list">
+{cat_items}
+</ul>
+</div>"""
+
+
+def _build_token_map(page, site, base_url, url_style, pages_json, toc_html, infobox_html, backlinks_html,
+                      categories_html, metadata_pane_html, metadata_tool_html, metadata_tab_html,
+                      type_label_html, layout_label_html, slug_json, page_kind, layout_stem, body_html, page_source):
+    return {
+        "%wiki.base_url%": base_url,
+        "%wiki.url_style%": url_style,
+        "%wiki.pages%": pages_json,
+        "%wiki.title%": page.title if page else "All Pages",
+        "%wiki.slug%": slug_json,
+        "%wiki.source%": page_source,
+        "%wiki.layout_stem%": layout_stem,
+        "%wiki.page_kind%": page_kind,
+        "%wiki.body%": body_html,
+        "%wiki.toc%": toc_html,
+        "%wiki.backlinks%": backlinks_html,
+        "%wiki.infobox%": infobox_html,
+        "%wiki.categories%": categories_html,
+        "%wiki.metadata_pane%": metadata_pane_html,
+        "%wiki.metadata_tool%": metadata_tool_html,
+        "%wiki.metadata_tab%": metadata_tab_html,
+        "%wiki.type_label%": type_label_html,
+        "%wiki.layout_label%": layout_label_html,
+        "%wiki.head%": f"<title>{html_module.escape(page.title if page else 'All Pages')} - Wiki Wikipedia Template</title>",
+    }
+
+
+def _build_index_page(site, base_url, url_style, pages_json, layout_text):
     links_html = ""
     seen_files: set[str] = set()
     for page in site.pages:
@@ -334,29 +342,15 @@ def _build_index_page_html(
             links_html += f'<li data-categories="{html_module.escape(cats_attr)}"><a href="{page_href(base_url, page.file_slug, url_style)}">{html_module.escape(page.title)}</a></li>\n'
     body_html = f'<ul class="pages-list">\n{links_html}</ul>'
     slug_json = json.dumps("__index__")
-    return template.render(
-        base_url=base_url,
-        url_style=url_style,
-        page_title="All Pages",
-        page_kind="index",
-        body_class="wiki-index",
-        layout_class="index",
-        body_html=body_html,
-        page_source="",
-        slug_json=slug_json,
-        pages_json=pages_json,
-        type_label="",
-        layout_label="",
-        infobox_html="",
-        toc_html="",
-        backlinks_html="",
-        categories_html="",
-        sidebar_html="",
-        metadata_tool_html="",
-        metadata_tab_html="",
-        metadata_pane_html="",
-        has_metadata=False,
+    tokens = _build_token_map(
+        page=None, site=site, base_url=base_url, url_style=url_style,
+        pages_json=pages_json, toc_html="", infobox_html="", backlinks_html="",
+        categories_html="", metadata_pane_html="", metadata_tool_html="",
+        metadata_tab_html="", type_label_html="", layout_label_html="",
+        slug_json=slug_json, page_kind="index", layout_stem="index",
+        body_html=body_html, page_source="",
     )
+    return substitute(layout_text, tokens)
 
 
 def build(output_dir: Path) -> None:
@@ -376,9 +370,8 @@ def build(output_dir: Path) -> None:
         default=str,
     )
 
-    template_path = script_dir / "layouts" / "wikipedia.html.j2"
-    template_source = template_path.read_text(encoding="utf-8")
-    template = Template(template_source)
+    layout_path = script_dir / "layouts" / "wikipedia.html"
+    layout_text = layout_path.read_text(encoding="utf-8")
 
     selected_view = resolve_metadata_view("json-ld", "compacted")
 
@@ -388,7 +381,7 @@ def build(output_dir: Path) -> None:
     wiki_output = output_dir / base_path if base_path else output_dir
     wiki_output.mkdir(parents=True, exist_ok=True)
 
-    index_html = _build_index_page_html(site, base_url, url_style, template, pages_json)
+    index_html = _build_index_page(site, base_url, url_style, pages_json, layout_text)
     index_out = wiki_output / "index.html"
     index_out.parent.mkdir(parents=True, exist_ok=True)
     index_out.write_text(index_html, encoding="utf-8")
@@ -398,26 +391,12 @@ def build(output_dir: Path) -> None:
         has_metadata = page.has_frontmatter
 
         toc_html = _build_toc_html(page, base_url, url_style)
-        sidebar_html = _build_sidebar_contents_html(page, base_url, url_style)
-        backlinks_html = _build_backlinks_html(page, site, base_url, url_style)
+        backlinks_html = build_backlinks_html(page, site, base_url, url_style)
         infobox_html = _build_infobox_html(page, site, base_url, url_style)
-        cats = _get_page_categories(page)
-        categories_html = ""
-        if cats:
-            from urllib.parse import quote
-            cat_items = "".join(
-                f'<li class="catlinks-item"><a href="{base_url}/?category={quote(cat)}">{html_module.escape(cat)}</a></li>'
-                for cat in cats
-            )
-            categories_html = f"""<div class="catlinks" id="catlinks">
-<div class="catlinks-label">Categories:</div>
-<ul class="catlinks-list">
-{cat_items}
-</ul>
-</div>"""
+        categories_html = _build_categories_html(page, base_url)
 
-        layout_label = _layout_label(page)
-        type_label = _type_label(page)
+        layout_label_html = _layout_label(page)
+        type_label_html = _type_label(page)
 
         metadata_pane_html = ""
         metadata_tool_html = ""
@@ -428,31 +407,20 @@ def build(output_dir: Path) -> None:
             metadata_tab_html = '<li id="ca-metadata"><a href="#view-metadata-content" onclick="switchTab(\'metadata\'); return false;">Metadata</a></li>'
 
         slug_json = json.dumps(page.full_slug)
-        layout_class = page.layout_stem
+        layout_stem = page.layout_stem
 
-        html = template.render(
-            base_url=base_url,
-            url_style=url_style,
-            page_title=page.title,
-            page_kind="article",
-            body_class=f"wiki-page layout-{layout_class}",
-            layout_class=layout_class,
-            body_html=page.html,
-            page_source=page.markdown,
-            slug_json=slug_json,
-            pages_json=pages_json,
-            type_label=type_label,
-            layout_label=layout_label,
-            infobox_html=infobox_html,
-            toc_html=toc_html,
-            backlinks_html=backlinks_html,
-            categories_html=categories_html,
-            sidebar_html=sidebar_html,
-            metadata_tool_html=metadata_tool_html,
-            metadata_tab_html=metadata_tab_html,
-            metadata_pane_html=metadata_pane_html,
-            has_metadata=has_metadata,
+        tokens = _build_token_map(
+            page=page, site=site, base_url=base_url, url_style=url_style,
+            pages_json=pages_json, toc_html=toc_html, infobox_html=infobox_html,
+            backlinks_html=backlinks_html, categories_html=categories_html,
+            metadata_pane_html=metadata_pane_html, metadata_tool_html=metadata_tool_html,
+            metadata_tab_html=metadata_tab_html, type_label_html=type_label_html,
+            layout_label_html=layout_label_html, slug_json=slug_json,
+            page_kind="article", layout_stem=layout_stem,
+            body_html=page.html, page_source=page.markdown,
         )
+
+        html = substitute(layout_text, tokens)
 
         out = page_output_path(wiki_output, page.full_slug, url_style)
         out.parent.mkdir(parents=True, exist_ok=True)

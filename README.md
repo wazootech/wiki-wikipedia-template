@@ -1,24 +1,20 @@
 # Wiki Wikipedia Template
 
-A semantic markdown knowledge base with a **Wikipedia-themed layout**, powered by the [Wiki CLI](https://github.com/wazootech/wiki).
+A semantic markdown knowledge base with a **Wikipedia-themed layout**, built with the [Wiki CLI](https://github.com/wazootech/wiki).
 
 ## Layout
 
 - `wiki.yml` — Wiki configuration, namespace prefixes, and `fmt` defaults.
 - `wiki/` — Contains markdown files with semantic frontmatter.
-- `assets/` — Static assets (CSS, logo) for the Wikipedia theme.
-- `layouts/` — Jinja2 template for the Wikipedia-themed layout.
-- `build.py` — Custom build script using the Wiki Python API.
+- `assets/` — Static assets (CSS, JS, logo) for the Wikipedia theme.
+- `layouts/` — Token-based layout template for the Wikipedia theme.
+- `build.py` — Build script using the Wiki Python library.
 
 ## Commands
 
 - **Build** (Wikipedia theme):
   ```bash
   python build.py
-  ```
-- **Build** (minimal default layout):
-  ```bash
-  wiki build
   ```
 - **Preview** (starts a local dev server):
   ```bash
